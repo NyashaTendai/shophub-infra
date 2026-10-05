@@ -123,6 +123,9 @@ resource "google_cloud_run_v2_service" "shophub" {
   }
 
   depends_on = [google_secret_manager_secret_iam_member.run_can_read]
+  lifecycle {
+    ignore_changes = [client, client_version, template[0].containers[0].image]
+  }
 }
 
 resource "google_cloud_run_v2_service_iam_member" "public" {

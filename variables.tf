@@ -24,5 +24,5 @@ variable "github_repo" {
 }
 
 variable "min_instances" {
-  default = 0
+  default = 1
 }

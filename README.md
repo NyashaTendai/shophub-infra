@@ -1,93 +1,59 @@
-# ShopHub
+# ShopHub infrastructure
 
-A small e-commerce API built to demonstrate a complete cloud delivery workflow: containerised app, infrastructure as code, automated tests, automated security scanning and a keyless CI/CD pipeline, running on Google Cloud at near-zero cost.
+Terraform for the ShopHub API on Google Cloud. The application code and the CI/CD pipeline live in the companion repo: https://github.com/NyashaTendai/shophub-ecommerce
 
-**Live:** https://shophub-i7hqueeccq-uc.a.run.app
-- `/health` health check
-- `/api/products` product list
-- `/api/products/<id>` single product
+## What it creates
 
-## Architecture
+| Area | Resources |
+|---|---|
+| Container registry | Artifact Registry repository `shophub`, with a cleanup policy that keeps the 2 newest images |
+| Runtime | Cloud Run service `shophub` (1 vCPU, 512Mi, maximum 2 instances, startup CPU boost), public access, and a runtime service account |
+| Secrets | A Secret Manager secret `database-url`, readable by the runtime service account and by the deploy account |
+| Keyless CI/CD | A Workload Identity Pool and provider for GitHub, a deploy service account, and the permissions it needs |
 
-```mermaid
-flowchart LR
-    Dev[Developer] -->|git push| GH[GitHub]
-    GH --> CI[GitHub Actions]
-    CI -->|1. pytest| CI
-    CI -->|2. build + push image tagged with commit SHA| AR[Artifact Registry]
-    CI -->|3. deploy, authenticated via Workload Identity Federation| CR[Cloud Run]
-    AR --> CR
-    SM[Secret Manager] -->|DATABASE_URL| CR
-    CR --> DB[(Neon PostgreSQL)]
-    User[Visitor] --> CR
+## Layout
+
+```
+main.tf                      root: provider and the two modules
+variables.tf                 project, region, image tag, minimum instances
+moved.tf                     moved blocks used when the code was split into modules
+deployer_secret_access.tf    lets the deploy account read the database URL secret
+modules/app_runtime/         registry, secret, runtime account, Cloud Run service
+modules/github_cicd/         Workload Identity Federation and the deploy account
 ```
 
-## Stack
+## How to use it
 
-| Layer | Choice |
-|---|---|
-| App | Python, Flask, SQLAlchemy, Flask-Migrate, gunicorn |
-| Database | PostgreSQL on Neon (free tier) |
-| Container | Docker, Artifact Registry |
-| Hosting | Google Cloud Run (scales to zero) |
-| Infrastructure as code | Terraform (separate repo: shophub-infra) |
-| CI/CD | GitHub Actions with Workload Identity Federation |
-| Secrets | Google Secret Manager |
-| Security scanning | pip-audit, Bandit, CodeQL, Dependabot, GitHub secret scanning |
+```powershell
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan
+terraform apply
+```
 
-## How it works
-
-1. Every push to `main` runs the test suite.
-2. If tests pass, the image is built, tagged with the commit SHA and pushed to Artifact Registry.
-3. Cloud Run is updated to that exact image, then a smoke test calls `/health`.
-4. Pull requests run tests only and never deploy.
+Read the plan before you apply. After an apply, the service URL is printed as `service_url`.
 
 ## Decisions and trade-offs
 
-- **Cloud Run instead of GKE.** The app is small and stateless. Cloud Run scales to zero, so an idle portfolio project costs nothing. GKE would add a cluster fee and always-on nodes.
-- **Neon instead of Cloud SQL.** Cloud SQL bills hourly even when idle. Neon's free tier keeps the data layer free, and it is still real PostgreSQL.
-- **No stored cloud keys.** GitHub authenticates to Google Cloud with short-lived tokens through Workload Identity Federation. The trust rule only accepts this repository on the `main` branch.
-- **Least privilege.** The deploy account can push to one registry and update one service. The runtime account can read one secret.
-- **Immutable image tags.** Each deploy uses the commit SHA, so every release is traceable and rollback is one command.
-- **Read-only public API.** There are no public write endpoints, so a public portfolio site cannot be filled with junk data. Sample products are added with a CLI command.
-- **Cost controls.** Max 2 instances, 512Mi memory, and a registry cleanup policy that keeps only the 2 newest images, so storage stays inside the free allowance.
+- **No stored cloud keys.** GitHub authenticates through Workload Identity Federation with short-lived tokens. The trust rule only accepts the `NyashaTendai/shophub-ecommerce` repository.
+- **Least privilege.** The deploy account can push to one registry, update one service and read one secret. The runtime account can read one secret.
+- **Image tag outside Terraform's control.** The pipeline deploys a new image for every commit, so Terraform ignores changes to the image and does not fight the pipeline.
+- **Modules.** The code is split into `app_runtime` and `github_cicd`. The `moved` blocks in `moved.tf` let existing resources change address without being destroyed and recreated.
+- **Secret value kept out of Terraform.** Terraform creates the secret, and the database URL itself is added separately, so it never appears in Terraform state or in Git.
 
-## Security
+## Always-on instance
 
-Security checks run on every push, on every pull request and once a week.
+`min_instances` defaults to 1, so one Cloud Run instance stays warm. The first request after idle takes under a second instead of about 7 to 9 seconds. It costs roughly $10 a month. To scale to zero instead, run `terraform apply -var="min_instances=0"`.
 
-| Check | What it covers |
-|---|---|
-| pip-audit | Known vulnerabilities in the Python packages in `requirements.txt` |
-| Bandit | Risky patterns in the application code |
-| CodeQL | Deeper static analysis, with results in the repository's Security tab |
-| Dependabot | Pull requests for outdated packages, GitHub Actions and Docker base images |
-| Secret scanning and push protection | Blocks passwords and keys from being pushed |
+## Pipeline access to the database URL
 
-The workflows run with read-only repository permissions (`contents: read`).
+`deployer_secret_access.tf` lets the GitHub deploy account read the `database-url` secret, and only that secret, so the pipeline can run database migrations before each deploy.
 
-The first scan found a vulnerable Werkzeug version (CVE-2026-102598). I fixed it by upgrading to 3.1.9, and the alert closed automatically.
+## Cost controls
 
-Bandit also flagged `app.run(host="0.0.0.0")`. That is intentional: inside a container the app must listen on all interfaces, and production runs under gunicorn. I skip that single rule (B104) in the workflow rather than turning Bandit off.
+Maximum 2 instances, 512Mi memory, and a registry cleanup policy so storage stays inside the free allowance. The only recurring cost is the always-on instance.
 
-![Security scans passing](docs/actions-security.png)
+## Not done yet
 
-![Dependabot alert fixed](docs/dependabot-fixed.png)
-
-## Run locally
-
-```bash
-python -m venv venv
-source venv/bin/activate        # Windows: .\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-flask --app app db upgrade
-flask --app app seed
-flask --app app run --port 8080
-pytest
-```
-
-Without `DATABASE_URL` the app uses a local SQLite file. Set `DATABASE_URL` to a PostgreSQL connection string to use Postgres.
-
-## Infrastructure
-
-Terraform code for the registry, secret, service accounts, Cloud Run service and CI/CD trust lives in the companion repo: https://github.com/NyashaTendai/shophub-infra
+- Terraform state is stored locally. Moving it to a Cloud Storage bucket with locking is the next step.

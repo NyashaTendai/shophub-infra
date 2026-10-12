@@ -1,73 +1,93 @@
-\# ShopHub infrastructure (Terraform)
+# ShopHub
 
+A small e-commerce API built to demonstrate a complete cloud delivery workflow: containerised app, infrastructure as code, automated tests, automated security scanning and a keyless CI/CD pipeline, running on Google Cloud at near-zero cost.
 
+**Live:** https://shophub-i7hqueeccq-uc.a.run.app
+- `/health` health check
+- `/api/products` product list
+- `/api/products/<id>` single product
 
-Terraform for the Google Cloud side of ShopHub: a Flask + Postgres API on Cloud Run,
+## Architecture
 
-deployed by GitHub Actions with no stored keys.
+```mermaid
+flowchart LR
+    Dev[Developer] -->|git push| GH[GitHub]
+    GH --> CI[GitHub Actions]
+    CI -->|1. pytest| CI
+    CI -->|2. build + push image tagged with commit SHA| AR[Artifact Registry]
+    CI -->|3. deploy, authenticated via Workload Identity Federation| CR[Cloud Run]
+    AR --> CR
+    SM[Secret Manager] -->|DATABASE_URL| CR
+    CR --> DB[(Neon PostgreSQL)]
+    User[Visitor] --> CR
+```
 
+## Stack
 
+| Layer | Choice |
+|---|---|
+| App | Python, Flask, SQLAlchemy, Flask-Migrate, gunicorn |
+| Database | PostgreSQL on Neon (free tier) |
+| Container | Docker, Artifact Registry |
+| Hosting | Google Cloud Run (scales to zero) |
+| Infrastructure as code | Terraform (separate repo: shophub-infra) |
+| CI/CD | GitHub Actions with Workload Identity Federation |
+| Secrets | Google Secret Manager |
+| Security scanning | pip-audit, Bandit, CodeQL, Dependabot, GitHub secret scanning |
 
-App code and the CI/CD workflow: https://github.com/NyashaTendai/shophub-ecommerce
+## How it works
 
-Local Kubernetes version: https://github.com/NyashaTendai/shophub-k8s
+1. Every push to `main` runs the test suite.
+2. If tests pass, the image is built, tagged with the commit SHA and pushed to Artifact Registry.
+3. Cloud Run is updated to that exact image, then a smoke test calls `/health`.
+4. Pull requests run tests only and never deploy.
 
+## Decisions and trade-offs
 
+- **Cloud Run instead of GKE.** The app is small and stateless. Cloud Run scales to zero, so an idle portfolio project costs nothing. GKE would add a cluster fee and always-on nodes.
+- **Neon instead of Cloud SQL.** Cloud SQL bills hourly even when idle. Neon's free tier keeps the data layer free, and it is still real PostgreSQL.
+- **No stored cloud keys.** GitHub authenticates to Google Cloud with short-lived tokens through Workload Identity Federation. The trust rule only accepts this repository on the `main` branch.
+- **Least privilege.** The deploy account can push to one registry and update one service. The runtime account can read one secret.
+- **Immutable image tags.** Each deploy uses the commit SHA, so every release is traceable and rollback is one command.
+- **Read-only public API.** There are no public write endpoints, so a public portfolio site cannot be filled with junk data. Sample products are added with a CLI command.
+- **Cost controls.** Max 2 instances, 512Mi memory, and a registry cleanup policy that keeps only the 2 newest images, so storage stays inside the free allowance.
 
-\## Layout
+## Security
 
-\- `main.tf`: provider and the two module calls
+Security checks run on every push, on every pull request and once a week.
 
-\- `variables.tf`: project, region, image tag, GitHub repo
+| Check | What it covers |
+|---|---|
+| pip-audit | Known vulnerabilities in the Python packages in `requirements.txt` |
+| Bandit | Risky patterns in the application code |
+| CodeQL | Deeper static analysis, with results in the repository's Security tab |
+| Dependabot | Pull requests for outdated packages, GitHub Actions and Docker base images |
+| Secret scanning and push protection | Blocks passwords and keys from being pushed |
 
-\- `modules/app_runtime/`: Artifact Registry (with cleanup policy), Secret Manager secret,
+The workflows run with read-only repository permissions (`contents: read`).
 
-&#x20; runtime service account, Cloud Run service (scale to zero, max 2), public access
+The first scan found a vulnerable Werkzeug version (CVE-2026-102598). I fixed it by upgrading to 3.1.9, and the alert closed automatically.
 
-\- `modules/github_cicd/`: Workload Identity Federation pool and provider (restricted to
+Bandit also flagged `app.run(host="0.0.0.0")`. That is intentional: inside a container the app must listen on all interfaces, and production runs under gunicorn. I skip that single rule (B104) in the workflow rather than turning Bandit off.
 
-&#x20; one repo and the `main` branch), deployer service account with least-privilege roles
+![Security scans passing](docs/actions-security.png)
 
-\- `moved.tf`: records the refactor from flat files to modules, so no resources were recreated
+![Dependabot alert fixed](docs/dependabot-fixed.png)
 
+## Run locally
 
+```bash
+python -m venv venv
+source venv/bin/activate        # Windows: .\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+flask --app app db upgrade
+flask --app app seed
+flask --app app run --port 8080
+pytest
+```
 
-\## Design decisions
+Without `DATABASE_URL` the app uses a local SQLite file. Set `DATABASE_URL` to a PostgreSQL connection string to use Postgres.
 
-\- **Keyless CI/CD:** GitHub Actions authenticates with Workload Identity Federation, so no
+## Infrastructure
 
-&#x20; service account keys exist to leak.
-
-\- **Least privilege:** the deployer can push images, update this one service, and act as the
-
-&#x20; runtime account. Nothing else.
-
-\- **Secrets stay out of state:** Terraform creates the empty secret; the database URL is added
-
-&#x20; with `gcloud`, so it never enters Terraform state or Git.
-
-\- **Low cost:** Cloud Run scales to zero, the registry keeps only 2 images, and a billing
-
-&#x20; budget alert is set.
-
-\- **Image tag ignored by Terraform:** CI deploys new images itself, so Terraform does not
-
-&#x20; fight the pipeline (`lifecycle.ignore_changes`).
-
-
-
-\## Usage
-
-Run `terraform init`, then `terraform plan`, then `terraform apply`.
-
-State and `*.tfvars` files are not committed (see `.gitignore`).
-
-
-
-\## Possible next steps
-
-\- Remote state in a GCS bucket with locking
-
-\- A second environment by calling `app_runtime` again with different inputs
-
-
+Terraform code for the registry, secret, service accounts, Cloud Run service and CI/CD trust lives in the companion repo: https://github.com/NyashaTendai/shophub-infra

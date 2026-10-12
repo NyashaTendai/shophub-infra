@@ -22,3 +22,7 @@ variable "image_tag" {
 variable "github_repo" {
   default = "NyashaTendai/shophub-ecommerce"
 }
+
+variable "min_instances" {
+  default = 0
+}

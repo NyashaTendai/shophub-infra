@@ -19,3 +19,8 @@ variable "deploy_service" {
 variable "image_tag" {
   type = string
 }
+
+variable "min_instances" {
+  type    = number
+  default = 0
+}

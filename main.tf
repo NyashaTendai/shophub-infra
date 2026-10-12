@@ -19,6 +19,7 @@ module "app_runtime" {
   container_port = var.container_port
   deploy_service = var.deploy_service
   image_tag      = var.image_tag
+  min_instances  = var.min_instances
 }
 
 module "github_cicd" {
@@ -35,3 +36,4 @@ module "github_cicd" {
 output "service_url" {
   value = module.app_runtime.service_url
 }
+

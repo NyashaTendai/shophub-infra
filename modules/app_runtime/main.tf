@@ -64,7 +64,7 @@ resource "google_cloud_run_v2_service" "shophub" {
     service_account = google_service_account.shophub_run.email
 
     scaling {
-      min_instance_count = 0
+      min_instance_count = var.min_instances
       max_instance_count = 2
     }
 
@@ -90,7 +90,8 @@ resource "google_cloud_run_v2_service" "shophub" {
           cpu    = "1"
           memory = "512Mi"
         }
-        cpu_idle = true
+        cpu_idle          = true
+        startup_cpu_boost = true
       }
     }
   }
@@ -109,3 +110,4 @@ resource "google_cloud_run_v2_service_iam_member" "public" {
   role     = "roles/run.invoker"
   member   = "allUsers"
 }
+
